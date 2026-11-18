@@ -15,12 +15,12 @@ concurrency:
 
 jobs:
   publish:
-    name: Publish student's images to Docker Hub
+    name: Build, Publish and Deploy TaskFlow
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
     steps:
-      - name: Checkout student's repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Validate required secrets
@@ -29,9 +29,9 @@ jobs:
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
         run: |
-          test -n "$DOCKERHUB_USERNAME" || (echo "Missing DOCKERHUB_USERNAME" && exit 1)
-          test -n "$DOCKERHUB_TOKEN" || (echo "Missing DOCKERHUB_TOKEN" && exit 1)
-          test -n "$POSTGRES_PASSWORD" || (echo "Missing POSTGRES_PASSWORD" && exit 1)
+          test -n "$DOCKERHUB_USERNAME" || exit 1
+          test -n "$DOCKERHUB_TOKEN" || exit 1
+          test -n "$POSTGRES_PASSWORD" || exit 1
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -76,43 +76,42 @@ jobs:
           DOCKERHUB_USERNAME=${DOCKERHUB_USERNAME}
           EOF
 
-      - name: Validate image-based deployment Compose
+      - name: Validate deployment configuration
         run: |
-          grep -q 'image:' docker-compose.deploy.yml
           if grep -Eq '^[[:space:]]+build:' docker-compose.deploy.yml; then
-            echo "Deployment Compose must use published images, not build:"
+            echo "Build configuration is not allowed in deployment compose"
             exit 1
           fi
           docker compose -f docker-compose.deploy.yml config --quiet
 
-      - name: Pull published images
+      - name: Pull Docker Hub images
         run: docker compose -f docker-compose.deploy.yml pull
 
-      - name: Deploy using Docker Hub images
+      - name: Deploy application
         run: docker compose -f docker-compose.deploy.yml up -d
 
-      - name: Verify deployment
+      - name: Verify backend health
         run: |
           for attempt in $(seq 1 40); do
             if curl --fail --silent http://localhost:3000/health; then
               echo
-              echo "Deployment backend is healthy"
+              echo "Backend is healthy"
               break
             fi
-
             if [ "$attempt" -eq 40 ]; then
               docker compose -f docker-compose.deploy.yml ps
               docker compose -f docker-compose.deploy.yml logs --no-color
               exit 1
             fi
-
             sleep 3
           done
 
+      - name: Verify frontend
+        run: |
           curl --fail --silent http://localhost:8080/ > /dev/null
           echo "Frontend is accessible"
 
-      - name: Run API tests against Docker Hub deployment
+      - name: Run API tests
         working-directory: tests
         env:
           BASE_URL: http://localhost:3000
@@ -121,16 +120,13 @@ jobs:
           npm install
           npm test
 
-      - name: Record published image references
+      - name: Deployment summary
         run: |
           {
-            echo "## Docker Hub publication"
-            echo ""
-            echo "- Backend: \`${{ secrets.DOCKERHUB_USERNAME }}/backend:latest\`"
-            echo "- Backend: \`${{ secrets.DOCKERHUB_USERNAME }}/backend:v1\`"
-            echo "- Frontend: \`${{ secrets.DOCKERHUB_USERNAME }}/frontend:latest\`"
-            echo "- Frontend: \`${{ secrets.DOCKERHUB_USERNAME }}/frontend:v1\`"
-            echo "- Commit: \`${GITHUB_SHA}\`"
+            echo "## TaskFlow Deployment"
+            echo "- Frontend: sidd183/frontend:latest"
+            echo "- Backend: sidd183/backend:latest"
+            echo "- Commit: $GITHUB_SHA"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Cleanup deployment
